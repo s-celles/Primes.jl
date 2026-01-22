@@ -12,6 +12,7 @@ export isprime, primes, primesmask, factor, eachfactor, divisors, ismersenneprim
        nextprime, nextprimes, prevprime, prevprimes, prime, prodfactors, radical, totient
 
 include("factorization.jl")
+include("quadratic_sieve.jl")
 
 # Primes generating functions
 #     https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes
@@ -392,6 +393,24 @@ function iterate(f::FactorIterator{T}, state=(f.n, T(3))) where T
     if n <= 2^32 || isprime(n)
         return (n, 1), (T(1), n)
     end
+
+    # For very large numbers with balanced factors, use quadratic sieve
+    # QS is more effective than Pollard's rho for numbers > 10^30 with similar-sized factors
+    if n >= QUADRATIC_SIEVE_THRESHOLD
+        try
+            p = quadratic_sieve_factor(n)
+            num_p = 0
+            while true
+                q, r = divrem(n, p)
+                r != 0 && return (p, num_p), (n, p)
+                num_p += 1
+                n = q
+            end
+        catch
+            # Fall back to Pollard's rho if QS fails
+        end
+    end
+
     should_widen = T <: BigInt || widemul(n - 1, n - 1) ≤ typemax(n)
     p = should_widen ? pollardfactor(n) : pollardfactor(widen(n))
     num_p = 0

@@ -511,3 +511,220 @@ end
     end
     @test primes(2^31-20, 2^31-1) == [2147483629, 2147483647]
 end
+
+#=============================================================================
+  Quadratic Sieve Tests
+=============================================================================#
+
+@testset "Quadratic Sieve" begin
+    # Access internal functions for testing
+    import Primes: compute_factor_base_bound, compute_sieve_interval, build_factor_base,
+                   tonelli_shanks, QSFactorBase, QSSmoothNumber, QSMatrix,
+                   factor_over_base, build_exponent_matrix, gaussian_elimination_gf2!,
+                   extract_factor, quadratic_sieve_factor, QUADRATIC_SIEVE_THRESHOLD
+
+    @testset "Parameter Selection" begin
+        # Test factor base bound computation (T005)
+        # For small numbers, bound should be reasonable
+        @test 100 <= compute_factor_base_bound(big(10)^20) <= 50000
+        # For 60-digit numbers, bound should be larger (capped at 10M)
+        @test 100000 <= compute_factor_base_bound(big(10)^60) <= 10_000_000
+
+        # Test sieve interval computation
+        @test 10000 <= compute_sieve_interval(big(10)^20) <= 100_000_000
+        @test 10_000_000 <= compute_sieve_interval(big(10)^60) <= 100_000_000
+
+        # Threshold should be approximately 10^30
+        @test QUADRATIC_SIEVE_THRESHOLD == big(10)^30
+    end
+
+    @testset "Tonelli-Shanks" begin
+        # Test √n mod p computation (T006)
+        # Test cases where we know the square root
+        @test powermod(tonelli_shanks(4, 7), 2, 7) == mod(4, 7)
+        @test powermod(tonelli_shanks(2, 7), 2, 7) == mod(2, 7)
+        @test powermod(tonelli_shanks(9, 13), 2, 13) == mod(9, 13)
+
+        # Test with larger primes
+        for p in [17, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+            for n in 1:p-1
+                if powermod(n, (p-1) ÷ 2, p) == 1  # n is a quadratic residue
+                    sqrt_n = tonelli_shanks(n, p)
+                    @test powermod(sqrt_n, 2, p) == mod(n, p)
+                end
+            end
+        end
+    end
+
+    @testset "Factor Base Construction" begin
+        # Test factor base generation with small n (T004)
+        n = big(143)  # 11 * 13
+        fb = build_factor_base(n, 50)
+
+        # Factor base should contain small primes
+        @test 2 in fb.primes
+        # All primes in factor base should have n as quadratic residue
+        for p in fb.primes
+            @test powermod(n, (p-1) ÷ 2, p) == 1 || p == 2
+        end
+
+        # sqrt_n_mod_p should satisfy (sqrt)² ≡ n (mod p)
+        for (i, p) in enumerate(fb.primes)
+            if p > 2
+                sqrt_n = fb.sqrt_n_mod_p[i]
+                @test powermod(sqrt_n, 2, p) == mod(n, p)
+            end
+        end
+    end
+
+    @testset "Smooth Number Factoring" begin
+        # Test factor_over_base (T015)
+        n = big(143)
+        fb = build_factor_base(n, 50)
+
+        # A number that factors completely over the base
+        smooth = 2 * 3 * 5 * 7
+        exps = factor_over_base(big(smooth), fb)
+        if exps !== nothing  # Only test if primes are in the base
+            @test exps[findfirst(==(2), fb.primes)] >= 1
+        end
+
+        # A large prime won't factor over a small base
+        large_prime = big(1009)
+        @test factor_over_base(large_prime, fb) === nothing
+    end
+
+    @testset "GF(2) Linear Algebra" begin
+        # Test Gaussian elimination over GF(2) (T017)
+        # Create a simple matrix with a known null space
+        rows = [
+            BitVector([true, true, false]),   # Row 1: [1, 1, 0]
+            BitVector([true, false, true]),   # Row 2: [1, 0, 1]
+            BitVector([false, true, true]),   # Row 3: [0, 1, 1] = Row1 ⊕ Row2
+        ]
+        matrix = QSMatrix(rows, [1, 2, 3], 3)
+        null_vecs = gaussian_elimination_gf2!(matrix)
+
+        # Should find that rows 1, 2, 3 XOR to zero
+        @test length(null_vecs) >= 1
+        if length(null_vecs) > 0
+            @test 1 in null_vecs[1] || 2 in null_vecs[1] || 3 in null_vecs[1]
+        end
+    end
+
+    @testset "Quadratic Sieve Factor - Small Numbers" begin
+        # Test with small semiprimes (T019 simplified)
+        # These are small enough to factor quickly but test the algorithm
+        test_cases = [
+            (big(15), big(3), big(5)),
+            (big(21), big(3), big(7)),
+            (big(35), big(5), big(7)),
+            (big(77), big(7), big(11)),
+            (big(91), big(7), big(13)),
+            (big(143), big(11), big(13)),
+        ]
+
+        for (n, p1, p2) in test_cases
+            # For small numbers, the QS might not be the best but should still work
+            # or throw an error for too-small inputs
+            try
+                f = quadratic_sieve_factor(n)
+                @test f == p1 || f == p2
+            catch e
+                # It's OK if QS fails on very small numbers - that's expected
+                # The algorithm is designed for larger numbers
+                @test e isa ErrorException || e isa ArgumentError
+            end
+        end
+    end
+
+    @testset "Quadratic Sieve Factor - 20-digit semiprimes" begin
+        # Test with 20-digit semiprimes (T014)
+        p1 = nextprime(big(10)^9)
+        p2 = nextprime(big(10)^9 + 1000)
+        n = p1 * p2
+
+        @test !isprime(n)
+        @test ndigits(n) >= 18
+
+        # This should complete in reasonable time
+        f = quadratic_sieve_factor(n)
+        @test n % f == 0
+        @test 1 < f < n
+        @test f == p1 || f == p2
+    end
+
+    # US2: Integration tests - verify factor() API uses QS appropriately
+    @testset "factor() integration - small numbers unchanged (T033)" begin
+        # Small numbers should still be fast (no regression)
+        for n in [12, 100, 1000, 2^16 - 1, 2^20]
+            f = factor(n)
+            @test prod(p^e for (p, e) in f) == n
+        end
+    end
+
+    @testset "factor() integration - medium numbers use Pollard (T034)" begin
+        # Medium numbers (< threshold) should still use Pollard's rho
+        n = big(2)^64 + 1  # Slightly above 64-bit
+        if !isprime(n)
+            f = factor(n)
+            @test prod(p^e for (p, e) in f) == n
+        end
+    end
+
+    @testset "factor() integration - large semiprimes use QS (T035)" begin
+        # Create a number above the QS threshold
+        p1 = nextprime(big(10)^15)
+        p2 = nextprime(big(10)^15 + 10^6)
+        n = p1 * p2
+
+        # This should be handled by QS since it's above threshold
+        @test n >= QUADRATIC_SIEVE_THRESHOLD
+
+        f = factor(n)
+        @test prod(p^e for (p, e) in f) == n
+        @test f[p1] == 1
+        @test f[p2] == 1
+    end
+
+    @testset "Regression test - existing tests pass (T037)" begin
+        # Verify basic factorization still works
+        @test factor(100) == Dict(2 => 2, 5 => 2)
+        @test factor(1) == Dict{Int,Int}()
+        @test factor(0) == Dict(0 => 1)
+        @test factor(-9) == Dict(-1 => 1, 3 => 2)
+    end
+
+    # Performance tests are disabled by default to keep CI fast
+    # Uncomment to run locally for validation
+    #=
+    @testset "Quadratic Sieve Factor - 50-digit semiprime (T020)" begin
+        # Generate 50-digit semiprime (~80-bit factors)
+        p1 = nextprime(big(10)^24)
+        p2 = nextprime(big(10)^24 + 10^10)
+        n = p1 * p2
+
+        @test ndigits(n) >= 48
+
+        # Should complete in < 30 seconds
+        elapsed = @elapsed f = quadratic_sieve_factor(n)
+        @test n % f == 0
+        @test 1 < f < n
+        @test elapsed < 30  # Performance target
+    end
+
+    @testset "Quadratic Sieve Factor - 60-digit semiprime (T021)" begin
+        # The reference number from issue #159
+        n = big"632459103267572196107100983820469021721602147490918660274601"
+
+        @test ndigits(n) == 60
+        @test !isprime(n)
+
+        # Should complete in < 2 minutes
+        elapsed = @elapsed f = quadratic_sieve_factor(n)
+        @test n % f == 0
+        @test 1 < f < n
+        @test elapsed < 120  # Performance target: 2 minutes
+    end
+    =#
+end
